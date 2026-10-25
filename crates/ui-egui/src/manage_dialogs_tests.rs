@@ -603,6 +603,85 @@ fn parameters_header_drag_retains_offset_and_bounds_the_card() {
     }
 }
 
+#[test]
+fn parameters_edges_resize_the_card_and_the_size_is_kept() {
+    let card = || scenario::rect_of("dialog:header").unwrap().union(scenario::rect_of("dialog:footer").unwrap());
+    let drag = |h: &mut Harness, edge: &str, by: egui::Vec2| {
+        let at = scenario::handle_at(&format!("panel:resize:{edge}")).unwrap();
+        h.call("ui.drag", json!({"x0":at.x,"y0":at.y,"x1":at.x+by.x,"y1":at.y+by.y,"steps":8}));
+        h.frames(6);
+    };
+    for layout in [LayoutMode::Docked, LayoutMode::Floating] {
+        let mut h = fixture();
+        h.call("ui.set", json!({"layout":layout}));
+        h.app.start("parameters.change");
+        h.frames(6);
+        let rest = card();
+        // Docked on the right: the left edge widens it with its right edge where it was.
+        drag(&mut h, "left", egui::vec2(-200.0, 0.0));
+        drag(&mut h, "bottom", egui::vec2(0.0, 150.0));
+        let resized = card();
+        assert!((resized.width() - rest.width() - 200.0).abs() < 2.0, "{layout:?}: {rest:?} -> {resized:?}");
+        assert!((resized.height() - rest.height() - 150.0).abs() < 2.0, "{layout:?}: {rest:?} -> {resized:?}");
+        assert!((resized.right() - rest.right()).abs() < 1.0 && (resized.top() - rest.top()).abs() < 1.0, "the docked corner stays put");
+        // The top and right edges move the card with them; the opposite edges stay put.
+        drag(&mut h, "top", egui::vec2(0.0, 80.0));
+        let topped = card();
+        assert!((topped.top() - resized.top() - 80.0).abs() < 2.0 && (topped.bottom() - resized.bottom()).abs() < 2.0, "{resized:?} -> {topped:?}");
+        drag(&mut h, "right", egui::vec2(-100.0, 0.0));
+        let righted = card();
+        assert!((righted.right() - topped.right() + 100.0).abs() < 2.0 && (righted.left() - topped.left()).abs() < 2.0, "{topped:?} -> {righted:?}");
+        drag(&mut h, "top_left", egui::vec2(-40.0, -40.0));
+        let cornered = card();
+        assert!((cornered.left_top() - righted.left_top() - egui::vec2(-40.0, -40.0)).length() < 3.0, "{righted:?} -> {cornered:?}");
+        assert!((cornered.right_bottom() - righted.right_bottom()).length() < 3.0, "{righted:?} -> {cornered:?}");
+        assert!(h.app.preferences.parameters_size.is_some());
+
+        // Reopened, it comes back at the size it was left at.
+        h.step(&json!({"click":{"handle":"params:close"}})).unwrap();
+        assert!(h.app.params.is_none());
+        h.app.start("parameters.change");
+        h.frames(6);
+        assert!((card().size() - cornered.size()).length() < 1.0, "{cornered:?} -> {:?}", card());
+        for edge in ["left", "right", "top", "bottom", "top_left", "top_right", "bottom_left", "bottom_right"] {
+            assert!(scenario::handle_at(&format!("panel:resize:{edge}")).is_some(), "{edge}");
+        }
+
+        // Never past the window, and never smaller than a few rows.
+        let viewport = crate::shell::tool_drag_rect(&h.app, crate::shell::content_rect(&h.app, h.app.viewport.rect.unwrap()));
+        for (edge, by) in [("bottom_left", egui::vec2(-5000.0, 5000.0)), ("top_right", egui::vec2(5000.0, -5000.0))] {
+            drag(&mut h, edge, by);
+            assert!(viewport.expand(2.0).contains_rect(card()), "{layout:?} {edge}: {:?} outside {viewport:?}", card());
+        }
+        drag(&mut h, "bottom_left", egui::vec2(5000.0, -5000.0));
+        let t = crate::theme::Tokens::get();
+        let min = [t.form_card_width * 1.5, t.form_header_height + t.form_footer_height + t.control_height * 4.0];
+        assert_eq!(h.app.preferences.parameters_size, Some(min), "{layout:?}");
+        let smallest = card();
+        assert!(smallest.width() > min[0] / 2.0 && smallest.height() > t.control_height * 4.0, "{layout:?}: {smallest:?}");
+
+        // A double-click on an edge puts back its own size.
+        h.step(&json!({"click":{"handle":"panel:resize:left"},"double":true})).unwrap();
+        h.frames(6);
+        assert_eq!(h.app.preferences.parameters_size, None);
+        assert!((card().size() - rest.size()).length() < 1.0, "{rest:?} -> {:?}", card());
+        assert!(viewport.expand(2.0).contains_rect(card()), "{layout:?}: {:?} outside {viewport:?}", card());
+    }
+}
+
+#[test]
+fn parameters_hostile_saved_size_is_bounded() {
+    for size in [[f32::NAN, 300.0], [f32::INFINITY, f32::INFINITY], [-50.0, -50.0], [1e9, 1e9], [0.0, 0.0]] {
+        let mut h = fixture();
+        h.app.preferences.parameters_size = Some(size);
+        h.app.start("parameters.change");
+        h.frames(6);
+        let card = scenario::rect_of("dialog:header").unwrap().union(scenario::rect_of("dialog:footer").unwrap());
+        let viewport = crate::shell::tool_drag_rect(&h.app, crate::shell::content_rect(&h.app, h.app.viewport.rect.unwrap()));
+        assert!(card.is_finite() && card.width() > 0.0 && viewport.expand(2.0).contains_rect(card), "{size:?}: {card:?}");
+    }
+}
+
 fn physical_editor(h: &mut Harness) -> &mut crate::material_editor::Editor {
     let dialogs::Kind::Material { editor, .. } = &mut h.app.dialog.as_mut().unwrap().kind else { panic!("physical material panel") };
     editor

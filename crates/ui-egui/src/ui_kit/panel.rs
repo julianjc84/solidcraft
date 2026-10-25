@@ -73,6 +73,7 @@ pub(crate) struct Panel<'a> {
     frame: egui::Frame,
     width: f32,
     body_rows: Option<f32>,
+    height: Option<f32>,
     ok: &'a str,
     cancel: &'a str,
     reset_scroll: bool,
@@ -92,6 +93,19 @@ pub(crate) struct ComputeStatus {
     pub text: Option<String>,
     pub busy: bool,
     pub applying: bool,
+}
+
+/// What a drag on a resizable card's edges asks for (`Panel::resize_rails`).
+pub(crate) enum Resize {
+    None,
+    /// Outer width and content height (without the frame), and where the card's anchor goes
+    /// (it moves when an edge on its docked side is dragged); the caller keeps them.
+    To {
+        size: egui::Vec2,
+        anchor: egui::Pos2,
+    },
+    /// A double-click on an edge: back to the card's own size.
+    Reset,
 }
 
 pub(crate) enum Part {
@@ -144,6 +158,7 @@ impl<'a> Panel<'a> {
             frame,
             width: Tokens::get().form_card_width,
             body_rows: None,
+            height: None,
             ok: "OK",
             cancel: "Cancel",
             reset_scroll: false,
@@ -180,6 +195,109 @@ impl<'a> Panel<'a> {
             self.body_rows = Some(rows.clamp(1.0, 32.0));
         }
         self
+    }
+
+    /// A content height (without the frame) the person dragged the card to, in place of
+    /// `body_rows`; the body then fills it even when its rows are fewer. Short viewports still
+    /// take precedence. `None` keeps the body-rows height.
+    pub(crate) fn height(mut self, height: Option<f32>) -> Self {
+        self.height = height.filter(|h| h.is_finite() && *h > 0.0);
+        self
+    }
+
+    /// Drag rails on all four edges and corners of a resizable card, which never makes it
+    /// smaller than `min` (outer width, content height) nor lets it leave the viewport. An edge
+    /// on the docked side moves the card's anchor with it, so the opposite edge stays put. Call
+    /// it inside the window after the contents. The drag runs from where the press started, as
+    /// the title drag does.
+    pub(crate) fn resize_rails(&self, ui: &Ui, min: egui::Vec2) -> Resize {
+        let t = Tokens::get();
+        let rect = ui.min_rect();
+        let (e, c) = (t.space_4, t.space_12);
+        let (l, r, top, b) = (rect.left(), rect.right(), rect.top(), rect.bottom());
+        // Which edges each rail moves: left, right, top, bottom.
+        let rails = [
+            (
+                "left",
+                egui::Rect::from_min_max(egui::pos2(l, top), egui::pos2(l + e, b)),
+                [true, false, false, false],
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (
+                "right",
+                egui::Rect::from_min_max(egui::pos2(r - e, top), egui::pos2(r, b)),
+                [false, true, false, false],
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (
+                "top",
+                egui::Rect::from_min_max(egui::pos2(l, top), egui::pos2(r, top + e)),
+                [false, false, true, false],
+                egui::CursorIcon::ResizeVertical,
+            ),
+            (
+                "bottom",
+                egui::Rect::from_min_max(egui::pos2(l, b - e), egui::pos2(r, b)),
+                [false, false, false, true],
+                egui::CursorIcon::ResizeVertical,
+            ),
+            // Corners are last, so they are on top of both edges where they meet.
+            ("top_left", egui::Rect::from_min_size(egui::pos2(l, top), vec2(c, c)), [true, false, true, false], egui::CursorIcon::ResizeNwSe),
+            ("top_right", egui::Rect::from_min_size(egui::pos2(r - c, top), vec2(c, c)), [false, true, true, false], egui::CursorIcon::ResizeNeSw),
+            ("bottom_left", egui::Rect::from_min_size(egui::pos2(l, b - c), vec2(c, c)), [true, false, false, true], egui::CursorIcon::ResizeNeSw),
+            (
+                "bottom_right",
+                egui::Rect::from_min_size(egui::pos2(r - c, b - c), vec2(c, c)),
+                [false, true, false, true],
+                egui::CursorIcon::ResizeNwSe,
+            ),
+        ];
+        let base = self.id.with("resize_base");
+        let right = self.side == crate::frame::Side::Right;
+        let anchor = self.bounded_anchor(ui.ctx());
+        let width = self.width.min(self.viewport.width().max(0.0));
+        // The card as the drag starts: its outer left/right from the anchor and width, its
+        // content top/bottom.
+        let card = egui::Rect::from_min_size(egui::pos2(if right { anchor.x - width } else { anchor.x }, anchor.y), vec2(width, rect.height()));
+        let mut out = Resize::None;
+        for (name, at, [ml, mr, mt, mb], cursor) in rails {
+            let response = ui.interact(at, self.id.with(("resize", name)), egui::Sense::click_and_drag()).on_hover_cursor(cursor);
+            scenario::publish_handle(&format!("panel:resize:{name}"), at.center());
+            if response.double_clicked() {
+                out = Resize::Reset;
+            }
+            if response.drag_started()
+                && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+            {
+                ui.ctx().data_mut(|d| d.insert_temp(base, (card, origin)));
+            }
+            if !(response.dragged() || response.drag_stopped()) {
+                continue;
+            }
+            ui.ctx().set_cursor_icon(cursor);
+            let start = ui.ctx().data(|d| d.get_temp::<(egui::Rect, egui::Pos2)>(base));
+            let (Some((from, origin)), Some(now)) = (start, ui.input(|i| i.pointer.latest_pos())) else { continue };
+            let moved = now - origin;
+            if !moved.is_finite() || !from.is_finite() {
+                continue;
+            }
+            let bounds = self.viewport;
+            let mut to = from;
+            if ml {
+                to.min.x = (from.min.x + moved.x).max(bounds.left()).min(from.max.x - min.x);
+            }
+            if mr {
+                to.max.x = (from.max.x + moved.x).min(bounds.right()).max(from.min.x + min.x);
+            }
+            if mt {
+                to.min.y = (from.min.y + moved.y).max(bounds.top()).min(from.max.y - min.y);
+            }
+            if mb {
+                to.max.y = (from.max.y + moved.y).max(from.min.y + min.y);
+            }
+            out = Resize::To { size: to.size(), anchor: if right { to.right_top() } else { to.left_top() } };
+        }
+        out
     }
 
     /// The painted anchor also drives dragging, including the shell's edge clearance.
@@ -298,7 +416,10 @@ impl<'a> Panel<'a> {
                 - self.frame.stroke.width;
             let footer_height = t.form_footer_height;
             let fields_height = (bottom - ui.cursor().top() - footer_height - ui.spacing().item_spacing.y).max(0.0);
-            let fields_height = self.body_rows.map_or(fields_height, |rows| fields_height.min(rows * t.control_height + t.space_12 * 2.0));
+            let fields_height = match self.height {
+                Some(height) => fields_height.min((min.y + height - ui.cursor().top() - footer_height - ui.spacing().item_spacing.y).max(0.0)),
+                None => self.body_rows.map_or(fields_height, |rows| fields_height.min(rows * t.control_height + t.space_12 * 2.0)),
+            };
             let fields_rect = egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), fields_height));
             let state = if collapsed.as_deref().copied().unwrap_or(false) {
                 scenario::publish_count("dialog:body:content_height", 0.0);
@@ -309,8 +430,12 @@ impl<'a> Panel<'a> {
                         // Clear persisted offset, animation and momentum once per opening.
                         egui::scroll_area::State::default().store(ui.ctx(), ui.make_persistent_id(egui::IdSalt::new("feature_fields")));
                     }
-                    let scroll =
-                        egui::ScrollArea::vertical().id_salt("feature_fields").min_scrolled_height(0.0).max_height(fields_height).show(ui, |ui| {
+                    let scroll = egui::ScrollArea::vertical()
+                        .id_salt("feature_fields")
+                        .min_scrolled_height(0.0)
+                        .max_height(fields_height)
+                        .auto_shrink([true, self.height.is_none()])
+                        .show(ui, |ui| {
                             if disabled {
                                 ui.disable();
                             }

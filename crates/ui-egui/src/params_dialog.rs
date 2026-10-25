@@ -197,6 +197,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let drag_bounds = crate::shell::tool_drag_rect(app, viewport);
     let anchor = crate::frame::offset_anchor(docked, moved, drag_bounds, side);
     let title = crate::i18n::tr_label("Parameters");
+    // The size the person dragged it to (#5097), never below room for a few rows; the viewport
+    // bounds it again every frame, so a smaller screen shows it smaller.
+    let t = crate::theme::Tokens::get();
+    let min = egui::vec2(t.form_card_width * 1.5, t.form_header_height + t.form_footer_height + t.control_height * 4.0);
+    let size = app.preferences.parameters_size.map(|[w, h]| egui::vec2(w, h)).filter(|s| s.is_finite()).map(|s| s.max(min));
     let panel = ui_kit::Panel::new(
         title,
         egui::Id::new("sc_params_dialog"),
@@ -205,12 +210,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         side,
         ui_kit::Panel::feature_frame(ctx, app.ui.layout, side),
     )
-    .wide()
+    .width(size.map_or(t.form_card_width * 3.0, |s| s.x))
     .body_rows(16.0)
+    .height(size.map(|s| s.y))
     .reset_scroll(d.reset_scroll);
     let panel = if side == crate::frame::Side::Left {
-        let available = palette.map_or(viewport.width(), |r| (r.left() - viewport.left() - crate::theme::Tokens::get().space_8).max(0.0));
-        panel.width((crate::theme::Tokens::get().form_card_width * 3.0).min(available))
+        let available = palette.map_or(viewport.width(), |r| (r.left() - viewport.left() - t.space_8).max(0.0));
+        panel.width(size.map_or(t.form_card_width * 3.0, |s| s.x).min(available))
     } else {
         panel
     };
@@ -322,6 +328,15 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         );
         d.reset_scroll = false;
         close = closed || matches!(action, ui_kit::Action::Ok | ui_kit::Action::Cancel);
+        match panel.resize_rails(ui, min) {
+            ui_kit::Resize::To { size, anchor } => {
+                let size = size.max(min).min(viewport.size().max(min));
+                app.preferences.parameters_size = Some([size.x, size.y]);
+                crate::frame::set_dock_offset(ui.ctx(), "PARAMETERS", anchor - docked);
+            }
+            ui_kit::Resize::Reset => app.preferences.parameters_size = None,
+            ui_kit::Resize::None => {}
+        }
     });
     // Each cell owns fresh Enter from raw events. The panel itself must not submit on
     // Enter in the filter or with unrelated focus (the legacy editor left those alone), but
