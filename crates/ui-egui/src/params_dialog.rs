@@ -60,6 +60,51 @@ pub struct ParamsDialog {
     group_sizes: std::collections::HashMap<String, egui::Vec2>,
     #[cfg(test)]
     groups_drawn: usize,
+    /// Compact folded to its title bar (by its fold button, or by auto-hide).
+    pub folded: bool,
+    /// Auto-hide: where the card was last frame, whether the pointer was near it, and since
+    /// when it has been away.
+    card: Option<egui::Rect>,
+    near: bool,
+    away_since: Option<f64>,
+}
+
+/// How close (points) the pointer comes to an auto-hiding card before it opens.
+const AUTO_HIDE_REACH: f32 = 24.0;
+/// How long (seconds) the pointer stays away before an auto-hiding card folds.
+const AUTO_HIDE_DELAY: f64 = 1.0;
+
+/// Auto-hide for the Compact card: fold it once the pointer has been away for a moment, open it
+/// when the pointer comes near. Never while something in it is being typed, edited, dragged or
+/// resized. A fold by its button stays until the pointer leaves and comes back.
+fn auto_hide(ctx: &egui::Context, d: &mut ParamsDialog) {
+    let Some(card) = d.card.filter(|r| r.is_finite()) else { return };
+    let zone = card.expand(AUTO_HIDE_REACH);
+    let (pointer, pressed_near, down, now) =
+        ctx.input(|i| (i.pointer.latest_pos(), i.pointer.press_origin().is_some_and(|p| zone.contains(p)), i.pointer.any_down(), i.time));
+    let near = pointer.is_some_and(|p| zone.contains(p));
+    let typing = ctx.memory(|m| m.focused()).and_then(|id| ctx.read_response(id)).is_some_and(|r| zone.intersects(r.rect));
+    let busy = typing
+        || (down && pressed_near)
+        || !d.editing.is_empty()
+        || !d.comments.is_empty()
+        || d.renaming.is_some()
+        || d.adding
+        || crate::frame::dock_dragging(ctx);
+    if near && !d.near {
+        d.folded = false;
+    }
+    d.near = near;
+    if near || busy {
+        d.away_since = None;
+        return;
+    }
+    let since = *d.away_since.get_or_insert(now);
+    if now - since >= AUTO_HIDE_DELAY {
+        d.folded = true;
+    } else if !d.folded {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((AUTO_HIDE_DELAY - (now - since)).max(0.0)));
+    }
 }
 
 #[derive(PartialEq)]
@@ -229,9 +274,18 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         d.lists += 1;
         rows
     };
+    let auto = compact && app.preferences.parameters_auto_hide;
+    if auto {
+        auto_hide(ctx, &mut d);
+    }
+    if !compact {
+        d.folded = false;
+    }
+    let mut folded = d.folded;
+    let panel = panel.fold_actions();
     let mut close = false;
-    panel.window(ctx).show(ctx, |ui| {
-        let (closed, action) = panel.feature(
+    let shown = panel.window(ctx).show(ctx, |ui| {
+        let (closed, action) = panel.feature_folding(
             ui,
             ui_kit::FeatureOptions {
                 icon: solidcraft_engine::find_command("parameters.change").map_or("", |c| c.icon),
@@ -243,6 +297,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             },
             false,
             true,
+            compact.then_some(&mut folded),
             |ui| {
                 let mut view = usize::from(!compact);
                 ui_kit::row(ui, "View", |ui| {
@@ -250,6 +305,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         app.preferences.parameters_compact = view == 0;
                     }
                 });
+                if compact {
+                    let response = ui_kit::checkbox(ui, "Auto-hide", &mut app.preferences.parameters_auto_hide)
+                        .on_hover_text(crate::i18n::tr_label("Fold to the title bar while the pointer is away; open when it comes near"));
+                    crate::scenario::publish_handle("params:auto_hide", response.rect.center());
+                }
                 if !compact {
                     ui_kit::text(ui, crate::i18n::tr("manage.parameters_hint"), ui_kit::Text::Hint("manage"));
                 }
@@ -341,6 +401,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         d.reset_scroll = false;
         close = closed || matches!(action, ui_kit::Action::Ok | ui_kit::Action::Cancel);
     });
+    d.folded = folded;
+    d.card = shown.map(|s| s.response.rect);
+    if !auto {
+        (d.near, d.away_since) = (false, None);
+    }
     // Each cell owns fresh Enter from raw events. The panel itself must not submit on
     // Enter in the filter or with unrelated focus (the legacy editor left those alone), but
     // the filter, rename and comment fields still see Enter first to give up focus.

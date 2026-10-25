@@ -582,6 +582,9 @@ preference_settings! {
     /// Show the Parameters panel compact (every parameter as its name and expression, its value on
     /// hover) instead of full.
     parameters_compact: bool = false, PAGE_INTERFACE;
+    /// The Compact Parameters panel folds to its title bar while the pointer is away from it, and
+    /// opens again when the pointer comes near.
+    parameters_auto_hide: bool = false, PAGE_INTERFACE;
     /// The wheel zooms toward the point under the cursor (else toward the view's centre).
     zoom_to_cursor: bool = true, PAGE_NAVIGATION => check("Zoom to the cursor", "The wheel zooms toward the point under the cursor (off: toward the view's centre)");
     /// Spread discrete wheel input across frames (off: apply each event immediately).
